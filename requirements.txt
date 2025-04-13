@@ -1,0 +1,7 @@
+pydicom
+numpy
+torch
+pandas==2.2.3
+pillow
+tqdm==4.67.1
+tensorboardX==2.6.2.2
