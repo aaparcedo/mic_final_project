@@ -7,6 +7,10 @@ import glob
 import xml.etree.ElementTree as ET
 from PIL import Image, ImageDraw
 from scipy.ndimage import zoom
+import numpy as np
+from scipy.ndimage import label
+import torchio as tio
+import albumentations as A
 
 BASE_PATH = os.path.expanduser("~")
 
@@ -360,6 +364,136 @@ class LungNoduleDataset(Dataset):
             # Return a dummy sample in case of error
             dummy_depth = 10 if not self.resize_slices else 5
             return torch.zeros((dummy_depth, self.target_size[0], self.target_size[1])), torch.zeros((dummy_depth, self.target_size[0], self.target_size[1])), diagnosis
+
+class LungNoduleDatasetSliced(Dataset):
+    """
+    Enhanced 2D/3D compatible dataset with ROI slicing and modality-specific augmentations
+    """
+
+    def __init__(self, paths_file, mode='3D', transform=None, target_size=(256, 256),
+                 resize_slices=False, roi_size=(64, 64, 64), margin=16,
+                 aug_3d=None, aug_2d=None):
+        """
+        Args:
+            mode: '2D' or '3D' operation mode
+            roi_size: (depth, height, width) for 3D ROI extraction
+            margin: Padding around ROI in 3D mode
+            aug_3d: torchio.Compose for 3D augmentations
+            aug_2d: albumentations.Compose for 2D augmentations
+        """
+        super().__init__(paths_file, transform, target_size, resize_slices)
+        self.mode = mode
+        self.roi_size = roi_size
+        self.margin = margin
+
+        # Initialize modality-specific augmentations
+        self.aug_3d = aug_3d or self.default_3d_augmentations()
+        self.aug_2d = aug_2d or self.default_2d_augmentations()
+
+    def default_3d_augmentations(self):
+        """Default 3D augmentation pipeline"""
+        return tio.Compose([
+            tio.RandomFlip(axes=(0, 1, 2)),
+            tio.RandomAffine(scales=(0.8, 1.2), degrees=15),
+            tio.RandomNoise(std=0.1),
+            tio.RandomBiasField(coefficients=0.3),
+            tio.RandomBlur(std=(0, 2)),
+            tio.ZNormalization(),
+        ])
+
+    def default_2d_augmentations(self):
+        """Default 2D augmentation pipeline"""
+        return A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.Rotate(limit=15, p=0.8),
+            A.ElasticTransform(p=0.5),
+            A.GaussNoise(var_limit=(0, 0.05), p=0.3),
+            A.RandomBrightnessContrast(p=0.5),
+            A.Normalize()
+        ])
+
+    def _find_roi_centroid(self, mask):
+        """Find largest connected component's centroid (3D)"""
+        labeled_mask, num_labels = label(mask)
+        if num_labels == 0:
+            return None
+
+        largest_cc = np.argmax(np.bincount(labeled_mask.flat)[1:]) + 1
+        z, y, x = np.where(labeled_mask == largest_cc)
+        return (
+            (z.max() + z.min()) // 2,
+            (y.max() + y.min()) // 2,
+            (x.max() + x.min()) // 2
+        )
+
+    def _extract_3d_roi(self, volume, mask):
+        """Extract 3D ROI with safety padding"""
+        centroid = self._find_roi_centroid(mask.numpy())
+        if not centroid:
+            return volume, mask  # Return original if no mask
+
+        # Calculate crop boundaries with safety checks
+        z_start = max(0, centroid[0] - self.roi_size[0] // 2 - self.margin)
+        y_start = max(0, centroid[1] - self.roi_size[1] // 2 - self.margin)
+        x_start = max(0, centroid[2] - self.roi_size[2] // 2 - self.margin)
+
+        z_end = min(volume.shape[0], z_start + self.roi_size[0] + 2 * self.margin)
+        y_end = min(volume.shape[1], y_start + self.roi_size[1] + 2 * self.margin)
+        x_end = min(volume.shape[2], x_start + self.roi_size[2] + 2 * self.margin)
+
+        return volume[z_start:z_end, y_start:y_end, x_start:x_end], \
+            mask[z_start:z_end, y_start:y_end, x_start:x_end]
+
+    def _process_3d(self, volume, mask):
+        """3D processing pipeline"""
+        # Apply ROI extraction
+        volume, mask = self._extract_3d_roi(volume, mask)
+
+        # Convert to torchio Subject
+        subject = tio.Subject(
+            image=tio.ScalarImage(tensor=volume.unsqueeze(0)),
+            mask=tio.LabelMap(tensor=mask.unsqueeze(0))
+        )
+
+        # Apply 3D augmentations
+        if self.aug_3d:
+            subject = self.aug_3d(subject)
+
+        return subject.images.data.squeeze(0), subject.masks.data.squeeze(0)
+
+    def _process_2d(self, volume, mask):
+        """2D processing pipeline"""
+        # Select slice with maximum mask area
+        if mask.sum() > 0:
+            slice_idx = torch.argmax(mask.sum(dim=(1, 2)))
+        else:
+            slice_idx = torch.randint(0, volume.shape[0], (1,))
+
+        # Extract 2D slice
+        img_slice = volume[slice_idx].numpy()
+        mask_slice = mask[slice_idx].numpy()
+
+        # Apply 2D augmentations
+        if self.aug_2d:
+            augmented = self.aug_2d(image=img_slice, mask=mask_slice)
+            img_slice = augmented['image']
+            mask_slice = augmented['mask']
+
+        # Add channel dimension
+        return img_slice[None], mask_slice[None]  # Shape: [1, H, W]
+
+    def __getitem__(self, idx):
+        # Original loading from parent class
+        volume, mask, diagnosis = super().__getitem__(idx)
+
+        # Mode-specific processing
+        if self.mode == '3D':
+            volume, mask = self._process_3d(volume, mask)
+        elif self.mode == '2D':
+            volume, mask = self._process_2d(volume, mask)
+
+        return volume, mask, diagnosis
 
 
 # Example usage

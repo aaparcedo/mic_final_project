@@ -9,9 +9,9 @@ from torch.utils.data import DataLoader, random_split
 from torch.amp import GradScaler, autocast
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
-
 from dataset import LungNoduleDataset
 from model import LungNoduleNet, CombinedLoss
+
 
 # Set random seeds for reproducibility
 def set_seed(seed=42):
@@ -22,6 +22,7 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
 
 def train_model(args):
     set_seed(args.seed)
