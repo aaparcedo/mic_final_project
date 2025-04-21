@@ -42,8 +42,6 @@ with open("paths_with_diagnosis.txt", 'w') as f:
         line = f"{entry['path']} {entry['diagnosis']}"
         f.write(line + '\n')
         print(line)
-# %%
-
 
 # %%
 lines = []
