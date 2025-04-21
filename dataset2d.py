@@ -4,6 +4,7 @@ import numpy as np
 from torch.utils.data import Dataset, random_split
 import glob
 from pathlib import Path
+from torchvision.transforms import Compose, Resize, Normalize
 
 class LIDCIDRI2DDataset(Dataset):
     def __init__(self, root_dir, transform=None, mask_transform=None, split=None, train_ratio=0.7, val_ratio=0.15, seed=42):
@@ -145,5 +146,16 @@ class LIDCIDRI2DDataset(Dataset):
             "diagnosis": diagnosis,
             "has_mask": sample_info["has_mask"],
             "case_id": sample_info["case_id"],
-            "img_name": sample_info["img_name"],
-        }
+            "img_name": sample_info["img_name"]}
+
+
+def get_model_specific_transform(model_type):
+    if model_type == "MobileSAM":
+        return Compose([
+            Resize((1024, 1024)),
+            Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+    elif model_type == "PMFSNet":
+        return Compose([Resize((256, 256))])  # Match PMFSNet input size
+    else:  # UNet
+        return Compose([Resize((512, 512))])

@@ -7,9 +7,15 @@ from dataset2d import LIDCIDRI2DDataset
 import torch.optim as optim
 import time
 import os
+from model import create_model
 
 import wandb
+
+from models.MobileSAMLIDCWrapper import MobileSAMLIDCWrapper
+
 wandb.init(project="mic_final_project")
+wandb.config.model_type = "PMFSNet"  # Can be UNet/MobileSAM/PMFSNet
+model = create_model(wandb.config.model_type, device)
 
 wandb.config.epochs = 100
 wandb.config.batch_size = 32
@@ -24,6 +30,14 @@ CLASS_WEIGHTS = wandb.config.class_weights
 REDUCTION = wandb.config.reduction
 NUM_EPOCHS = wandb.config.epochs
 BATCH_SIZE = wandb.config.batch_size
+
+
+# Modified forward pass handling
+def get_segmentation_output(model, images):
+    if isinstance(model, MobileSAMLIDCWrapper):
+        features = model(images)
+        return model.final_conv(features)
+    return model(images)
 
 # Set random seeds for reproducibility
 def set_seed(seed):
@@ -87,6 +101,13 @@ wandb.config.update({
     "cls_loss": cls_criterion.__class__.__name__,
     "optimizer": optimizer.__class__.__name__,
     "weight_decay": optimizer.param_groups[0].get('weight_decay', 0),
+    "input_size": {
+        "UNet": (512, 512),
+        "MobileSAM": (1024, 1024),
+        "PMFSNet": (256, 256)
+    }[wandb.config.model_type],
+    "normalization": "model-specific",
+    "architecture": wandb.config.model_type
 })
 
 best_val_loss = float('inf')
@@ -104,6 +125,7 @@ for epoch in range(NUM_EPOCHS):
     
     # training loop
     for batch_idx, batch in enumerate(train_progress):
+
         image = batch["image"].unsqueeze(dim=1).to(device) # add channel dimension, image.shape = [B, 1, 512, 512]
         mask = batch["mask"].unsqueeze(dim=1).to(device) # add channel dimension, mask.shape = [B, 1, 512, 512]
         diagnosis = batch["diagnosis"].to(device) # diagnosis.shape = [B, 1]
@@ -111,6 +133,12 @@ for epoch in range(NUM_EPOCHS):
         assert diagnosis.shape == torch.Size([image.shape[0]]), f'diagnosis shape: {diagnosis.shape}, expected: {torch.Size([BATCH_SIZE])}'
         
         optimizer.zero_grad()
+        
+        #if wandb.config.model_type == "PMFSNet":
+        #    logits = model(images)
+        #else:
+        #    logits = get_segmentation_output(model, images)
+
         
         seg_preds, cls_preds = model(image) # seg_preds.shape (B, C, H, W), cls_preds.shape [B, NUM_CLASSES]
         seg_loss = seg_criterion(seg_preds, mask)
@@ -148,17 +176,17 @@ for epoch in range(NUM_EPOCHS):
             
             combined_loss = (seg_loss + cls_loss)
             
-            val_loss += combined_loss.item()
-            
+            val_loss += combined_loss.item()            
             val_progress.set_postfix({'val loss': (val_loss / (batch_idx + 1))})
             
+
             tp, fp, fn, tn = smp.metrics.get_stats(seg_preds, mask.round().long(), mode='binary', threshold=0.5)
             
             val_total_dice_score += smp.metrics.f1_score(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
             val_total_iou_score += smp.metrics.iou_score(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
             val_total_recall_score += smp.metrics.recall(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
             val_total_precision_score += smp.metrics.precision(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
-            
+
             _, predicted_classes = torch.max(cls_preds, dim=1)
             val_total_cls_accuracy += (predicted_classes == diagnosis).float().mean()
             
