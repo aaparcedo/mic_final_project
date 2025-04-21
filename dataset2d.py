@@ -23,6 +23,7 @@ class LIDCIDRI2DDataset(Dataset):
         self.root_dir = Path(root_dir)
         self.transform = transform
         self.mask_transform = mask_transform
+        self.diagnosis_information = self.get_diagnosis_information()
         
         # Get all images from regular data
         self.image_dirs = sorted(list(Path(self.root_dir / "images").glob("LIDC-IDRI-*")))
@@ -103,11 +104,22 @@ class LIDCIDRI2DDataset(Dataset):
             else:
                 raise ValueError(f"Invalid split: {split}. Must be 'train', 'val', or 'test'.")
     
+    def get_diagnosis_information(self):
+        diagnosis_information = {}
+        with open(f'patient_ids_with_diagnosis.txt', 'r') as file:
+            for entry in file:
+                case_id = entry.strip()[:-2]
+                diagnosis = entry.strip()[-1]
+                diagnosis_information[case_id] = diagnosis
+        return diagnosis_information
+    
     def __len__(self):
         return len(self.samples)
     
     def __getitem__(self, idx):
         sample_info = self.samples[idx]
+        
+        diagnosis = torch.tensor(int(self.diagnosis_information[sample_info['case_id']]))
         
         # Load the image
         image = np.load(sample_info["image_path"])
@@ -131,6 +143,7 @@ class LIDCIDRI2DDataset(Dataset):
         return {
             "image": image,
             "mask": mask,
+            "diagnosis": diagnosis,
             "has_mask": sample_info["has_mask"],
             "case_id": sample_info["case_id"],
             "img_name": sample_info["img_name"]}
