@@ -4,3 +4,4 @@ prediction_visualizations/
 wandb/
 *tfevents*
 __pycache__
+.idea/

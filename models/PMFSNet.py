@@ -10,10 +10,98 @@ import os
 import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from ConvBlock import ConvBlock
-from LocalPMFSBlock import DownSampleWithLocalPMFSBlock
-from GlobalPMFSBlock import GlobalPMFSBlock_AP_Separate
+from .ConvBlock import ConvBlock
+from .LocalPMFSBlock import DownSampleWithLocalPMFSBlock
+from .GlobalPMFSBlock import GlobalPMFSBlock_AP_Separate
+
+
+class PMFSNetWithClassifier(nn.Module):
+    def __init__(self, in_channels=1, out_channels=35, num_classes=1, dim="3d", scaling_version="TINY",
+                 basic_module=DownSampleWithLocalPMFSBlock,
+                 global_module=GlobalPMFSBlock_AP_Separate):
+        super(PMFSNetWithClassifier, self).__init__()
+        
+        # Create the base segmentation model
+        self.base_model = PMFSNet(in_channels, out_channels, dim, scaling_version, 
+                                 basic_module, global_module)
+        
+        # Keep track of dimensions for classifier
+        self.dim = dim
+        
+        # Add a classification branch from the global features
+        if dim == "3d":
+            self.global_pool = nn.AdaptiveAvgPool3d(1)
+        else:
+            self.global_pool = nn.AdaptiveAvgPool2d(1)
+            
+        # Determine feature dimension based on the model configuration
+        if scaling_version == "BASIC":
+            # Last downsample channel size
+            base_channels = [24, 48, 64]
+            units = [5, 10, 10]
+            growth_rates = [4, 8, 16]
+        elif scaling_version == "SMALL":
+            base_channels = [24, 24, 24]
+            units = [5, 10, 10]
+            growth_rates = [4, 8, 16]
+        elif scaling_version == "TINY":
+            base_channels = [24, 24, 24]
+            units = [3, 5, 5]
+            growth_rates = [4, 8, 16]
+        else:
+            raise RuntimeError(f"{scaling_version} scaling version is not available")
+            
+        # Calculate feature dimension for the classifier from the last downsampling block
+        feature_dim = base_channels[2] + units[2] * growth_rates[2]
+        
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(feature_dim, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        )
+        
+    def forward(self, x):
+        # Get intermediate features from the downsampling blocks
+        x1, skip1 = self.base_model.down_convs[0](x)
+        x2, skip2 = self.base_model.down_convs[1](x1)
+        x3, skip3 = self.base_model.down_convs[2](x2)
+        
+        # Get global features
+        global_features = self.base_model.Global([x1, x2, x3])
+        
+        # Generate classification prediction
+        pooled = self.global_pool(global_features)
+        cls_preds = self.classifier(pooled)
+        
+        # Continue with segmentation branch
+        if self.base_model.scaling_version == "BASIC":
+            d2 = self.base_model.up2(global_features)
+            d2 = torch.cat((skip2, d2), dim=1)
+            d2 = self.base_model.up_conv2(d2)
+            d1 = self.base_model.up1(d2)
+            d1 = torch.cat((skip1, d1), dim=1)
+            d1 = self.base_model.up_conv1(d1)
+            
+            seg_preds = self.base_model.out_conv(d1)
+            seg_preds = self.base_model.upsample_out(seg_preds)
+        else:
+            skip3 = self.base_model.bottle_conv(torch.cat([global_features, skip3], dim=1))
+            
+            skip2 = self.base_model.upsample_1(skip2)
+            skip3 = self.base_model.upsample_2(skip3)
+            
+            seg_preds = self.base_model.out_conv(torch.cat([skip1, skip2, skip3], dim=1))
+            seg_preds = self.base_model.upsample_out(seg_preds)
+        
+        # For multi-class, you might want to apply softmax to cls_preds
+        cls_preds = F.softmax(cls_preds, dim=1)
+        
+        return seg_preds, cls_preds
 
 class PMFSNet(nn.Module):
     def __init__(self, in_channels=1, out_channels=35, dim="3d", scaling_version="TINY",

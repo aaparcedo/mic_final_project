@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 # from lib.models.modules.ConvBlock import ConvBlock
-from ConvBlock import ConvBlock
+from .ConvBlock import ConvBlock
 
 
 class DenseFeatureStackWithLocalPMFSBlock(nn.Module):

@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 # from lib.models.modules.ConvBlock import DepthWiseSeparateConvBlock
-from ConvBlock import DepthWiseSeparateConvBlock
+from .ConvBlock import DepthWiseSeparateConvBlock
 
 class GlobalPMFSBlock_AP_Separate(nn.Module):
     """
