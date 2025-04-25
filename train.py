@@ -3,39 +3,33 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from dataset2d import LIDCIDRI2DDataset, LIDCIDRIAugmentedDataset
+from dataset2d import LIDCIDRIAugmentedDataset
 import torch.optim as optim
 import time
 import os
 from model import create_model
 import wandb
+from utils import measure_inference_time, print_trainable_parameters
 
-# from models.MobileSAMLIDCWrapper import MobileSAMLIDCWrapper
+run_name = "unet"
 
-wandb.init(project="mic_final_project")
+wandb.init(project="mic_final_project", name=run_name)
 
-wandb.config.model_type = "PMFSNet"  # Can be UNet/MobileSAM/PMFSNet
-wandb.config.epochs = 100
-wandb.config.batch_size = 32
+wandb.config.model_type = "UNet"  # Can be UNet/MobileSAM/PMFSNet
+wandb.config.epochs = 20
+wandb.config.batch_size = 16
 wandb.config.seed = 42
 wandb.config.learning_rate = 1e-3
-wandb.config.encoder_name = "resnet34"
-wandb.config.encoder_weights = "imagenet"
-wandb.config.reduction = 'micro'
-wandb.config.class_weights = None # [0.0005, 0.9995]
+wandb.config.use_augmentation = True
+
+if wandb.config.model_type == "UNet":
+    wandb.config.encoder_name = "resnet34"
+    wandb.config.encoder_weights = "imagenet"
 
 CLASS_WEIGHTS = wandb.config.class_weights
 REDUCTION = wandb.config.reduction
 NUM_EPOCHS = wandb.config.epochs
 BATCH_SIZE = wandb.config.batch_size
-
-
-# Modified forward pass handling
-# def get_segmentation_output(model, images):
-#     if isinstance(model, MobileSAMLIDCWrapper):
-#         features = model(images)
-#         return model.final_conv(features)
-#     return model(images)
 
 # Set random seeds for reproducibility
 def set_seed(seed):
@@ -52,19 +46,20 @@ set_seed(wandb.config.seed)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LEARNING_RATE = wandb.config.learning_rate
-DATASET_DIR = '/home/cap5516.student2/LIDC-IDRI-2D'
-
 
 train_dataset = LIDCIDRIAugmentedDataset(
-    split='train'
+    split='train',
+    use_augmented=wandb.config.use_augmentation
 )
 
 val_dataset = LIDCIDRIAugmentedDataset(
-    split='val'
+    split='val',
+    use_augmented=wandb.config.use_augmentation
 )
 
 test_dataset = LIDCIDRIAugmentedDataset(
-    split='test'
+    split='test',
+    use_augmented=wandb.config.use_augmentation
 )
 
 # Create dataloaders
@@ -74,15 +69,21 @@ test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num
 
 model = create_model(wandb.config.model_type, device)
 
+print_trainable_parameters(model)
+
 total_samples = 101 + 224 + 658 + 573  # 1556
 num_classes = 4
 class_samples = [101, 224, 658, 573]
 class_weights = torch.FloatTensor([total_samples / (num_classes * count) for count in class_samples]).to(device)
 
 # loss, optimizer, scheduler
-seg_criterion = smp.losses.DiceLoss(mode='binary')
+if wandb.config.model_type == 'MobileSAM':
+    seg_criterion = smp.losses.DiceLoss(mode='binary', from_logits=False)
+    optimizer = optim.AdamW(params=model.parameters(), lr=LEARNING_RATE)
+else:
+    seg_criterion = smp.losses.DiceLoss(mode='binary')    
+    optimizer = optim.Adam(params=model.parameters(), lr=LEARNING_RATE)
 cls_criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
-optimizer = optim.Adam(params=model.parameters(), lr=LEARNING_RATE)
 
 wandb.config.update({
     "seg_loss": seg_criterion.__class__.__name__,
@@ -102,6 +103,9 @@ best_val_loss = float('inf')
 early_stopper = 0
 early_stopping_limit = 10
 
+# print("Measuring inference time...")
+# inference_time = measure_inference_time(model, test_loader, device)
+
 for epoch in range(NUM_EPOCHS):
     
     # Training phase
@@ -116,18 +120,21 @@ for epoch in range(NUM_EPOCHS):
         image = batch["image"].to(device) # add channel dimension, image.shape = [B, 1, 512, 512]
         mask = batch["mask"].to(device) # add channel dimension, mask.shape = [B, 1, 512, 512]
         diagnosis = batch["diagnosis"].to(device) # diagnosis.shape = [B, 1]
-        
-        assert diagnosis.shape == torch.Size([image.shape[0]]), f'diagnosis shape: {diagnosis.shape}, expected: {torch.Size([BATCH_SIZE])}'
-        
+                
         optimizer.zero_grad()
 
-        seg_preds, cls_preds = model(image) # seg_preds.shape (B, C, H, W), cls_preds.shape [B]
+        if wandb.config.model_type == 'MobileSAM':
+            seg_preds, cls_preds = model(image, mask=mask) 
+        else:
+            seg_preds, cls_preds = model(image) # seg_preds.shape (B, C, H, W), cls_preds.shape [B]
+            
         seg_loss = seg_criterion(seg_preds, mask)
         cls_loss = cls_criterion(cls_preds, diagnosis)
         
         combined_loss = seg_loss + cls_loss
         combined_loss.backward()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # clip gradients by norm
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         train_loss += combined_loss.item()
 
         optimizer.step()
@@ -148,10 +155,9 @@ for epoch in range(NUM_EPOCHS):
             image = batch["image"].to(device) # add channel dimension, image.shape = [B, 1, 512, 512]
             mask = batch["mask"].to(device) # add channel dimension, mask.shape = [B, 1, 512, 512]
             diagnosis = batch["diagnosis"].to(device) # diagnosis.shape = [B, 1]
-            
-            assert diagnosis.shape == torch.Size([image.shape[0]]), f'diagnosis shape: {diagnosis.shape}, expected: {torch.Size([BATCH_SIZE])}'
-            
+                        
             seg_preds, cls_preds = model(image) # seg_preds.shape (B, C, H, W), cls_preds.shape [B, NUM_CLASSES]
+            
             seg_loss = seg_criterion(seg_preds, mask)
             cls_loss = cls_criterion(cls_preds, diagnosis)
             
@@ -160,14 +166,13 @@ for epoch in range(NUM_EPOCHS):
             val_loss += combined_loss.item()            
             val_progress.set_postfix({'val loss': (val_loss / (batch_idx + 1))})
             
-
             tp, fp, fn, tn = smp.metrics.get_stats(seg_preds, mask.round().long(), mode='binary', threshold=0.5)
             
-            val_total_dice_score += smp.metrics.f1_score(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
-            val_total_iou_score += smp.metrics.iou_score(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
-            val_total_recall_score += smp.metrics.recall(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
-            val_total_precision_score += smp.metrics.precision(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
-
+            val_total_dice_score += smp.metrics.f1_score(tp, fp, fn, tn).mean()
+            val_total_iou_score += smp.metrics.iou_score(tp, fp, fn, tn).mean()
+            val_total_recall_score += smp.metrics.recall(tp, fp, fn, tn).mean()
+            val_total_precision_score += smp.metrics.precision(tp, fp, fn, tn).mean()
+            
             _, predicted_classes = torch.max(cls_preds, dim=1)
             val_total_cls_accuracy += (predicted_classes == diagnosis).float().mean()
             
@@ -190,9 +195,9 @@ for epoch in range(NUM_EPOCHS):
                 'val_dice_score': val_total_dice_score,
                 'val_cls_accuracy': val_total_cls_accuracy,
             }
-            output_dir = "/home/cap5516.student2/mic_final_project/output/2dunet"
-            run_name = f'2D_{wandb.config.model_type}_baseline_epoch{epoch}_{time.strftime("%Y%m%d-%H%M%S")}.pth'
-            save_path = os.path.join(output_dir, run_name)
+            output_dir = "/home/cap5516.student2/mic_final_project/output"
+            ckpt_name = f'{run_name}_epoch{epoch}_{time.strftime("%Y%m%d-%H%M%S")}.pth'
+            save_path = os.path.join(output_dir, ckpt_name)
         else:
             early_stopper += 1
             
@@ -216,7 +221,7 @@ for epoch in range(NUM_EPOCHS):
 torch.save(checkpoint, save_path)
     
 
-# LOAD BEST MODEL AND TEST IT
+# LOAD BEST MODEL FOR TESTING
 model = create_model(wandb.config.model_type, device)
 checkpoint = torch.load(save_path, map_location=torch.device('cuda'))
 print(f'Loading best model from run: {save_path}')
@@ -247,10 +252,10 @@ with torch.no_grad():
         
         tp, fp, fn, tn = smp.metrics.get_stats(seg_preds, mask.round().long(), mode='binary', threshold=0.5)
         
-        test_total_dice_score += smp.metrics.f1_score(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
-        test_total_iou_score += smp.metrics.iou_score(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
-        test_total_recall_score += smp.metrics.recall(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
-        test_total_precision_score += smp.metrics.precision(tp, fp, fn, tn, reduction=REDUCTION, class_weights=CLASS_WEIGHTS)
+        test_total_dice_score += smp.metrics.f1_score(tp, fp, fn, tn).mean()
+        test_total_iou_score += smp.metrics.iou_score(tp, fp, fn, tn).mean()
+        test_total_recall_score += smp.metrics.recall(tp, fp, fn, tn).mean()
+        test_total_precision_score += smp.metrics.precision(tp, fp, fn, tn).mean()
         
         _, predicted_classes = torch.max(cls_preds, dim=1)
 

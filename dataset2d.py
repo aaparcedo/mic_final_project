@@ -172,7 +172,8 @@ class LIDCIDRI2DDataset(Dataset):
             "diagnosis": diagnosis,
             "has_mask": sample_info["has_mask"],
             "case_id": sample_info["case_id"],
-            "img_name": sample_info["img_name"]
+            "img_name": sample_info["img_name"],
+            "image_path": str(sample_info['image_path'])
         }
 
 
