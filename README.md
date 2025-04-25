@@ -2,10 +2,11 @@
 Lung Nodule Localization and Classification in CT Images
 
 ## Installation
-1. Clone the repository:
+1. Clone the repository (and necessary repositories):
 ```bash
 git clone https://github.com/aaparcedo/mic_final_project.git
 cd mic_final_project
+git clone https://github.com/ChaoningZhang/MobileSAM.git
 ```
 
 2. Create and activate a virtual environment:
