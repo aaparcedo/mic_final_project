@@ -22,6 +22,7 @@ pip install -r requirements.txt
 ### Dataset
 Dataset has to be downloaded from the Cancer Imaging Archive[https://www.cancerimagingarchive.net/collection/lidc-idri/] with the NBIA Data Retriever[https://wiki.cancerimagingarchive.net/display/NBIA/Downloading+TCIA+Images].
 Once you have the dataset, update the paths in the make2ddataset.py file.
+Since we're doing localization and diagnosis prediction we only use the samples that have a final diagnosis, these are in the file paths_with_diagnosis.txt.
 ```bash
 python make2ddataset.py
 ```
